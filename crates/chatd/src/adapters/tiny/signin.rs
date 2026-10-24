@@ -2,7 +2,7 @@
 //! password. Nothing is kept until `POST /v1/session` answers 200. The password and the bearer
 //! are not logged. One sign-in at a time, in memory; closing the sheet drops it.
 
-use super::{post_session, Fault};
+use super::{post_accept, post_session, Fault};
 use crate::hub::Hub;
 use protocol::{AccountKey, Network, SignInInput, SignInProblem, SignInStep};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -13,6 +13,9 @@ pub type Adopt = Box<dyn Fn(&str) -> Result<Vec<AccountKey>, String> + Send + Sy
 struct Flow {
     server: String,
     email: String,
+    code: String,
+    display_name: String,
+    joining: bool,
     step: SignInStep,
     adopt: Adopt,
 }
@@ -131,6 +134,9 @@ pub fn step(
             *held = Some(Flow {
                 server: String::new(),
                 email: String::new(),
+                code: String::new(),
+                display_name: String::new(),
+                joining: false,
                 step: SignInStep::Server { problem: None },
                 adopt,
             });
@@ -159,10 +165,12 @@ pub fn cancel() {
 
 impl Flow {
     fn answer(&mut self, input: SignInInput) -> SignInStep {
+        let joining = self.joining;
         let next = match (&self.step, input) {
             (SignInStep::Server { .. }, SignInInput::Server { url }) => match base_url(&url) {
                 Some(server) => {
                     self.server = server.clone();
+                    self.joining = false;
                     SignInStep::Email {
                         server,
                         problem: None,
@@ -171,6 +179,58 @@ impl Flow {
                 None => SignInStep::Server {
                     problem: Some(SignInProblem::UrlInvalid),
                 },
+            },
+            (SignInStep::Server { .. }, SignInInput::HaveCode { url }) => match base_url(&url) {
+                Some(server) => {
+                    self.server = server.clone();
+                    self.joining = true;
+                    SignInStep::Invite {
+                        server,
+                        problem: None,
+                    }
+                }
+                None => SignInStep::Server {
+                    problem: Some(SignInProblem::UrlInvalid),
+                },
+            },
+            (SignInStep::Invite { .. }, SignInInput::Invite { code }) => {
+                let code = code.trim();
+                if code.is_empty() {
+                    SignInStep::Invite {
+                        server: self.server.clone(),
+                        problem: Some(SignInProblem::Other {
+                            reason: "Paste the code you were given.".to_owned(),
+                        }),
+                    }
+                } else {
+                    self.code = code.to_owned();
+                    SignInStep::Name {
+                        server: self.server.clone(),
+                        problem: None,
+                    }
+                }
+            }
+            (SignInStep::Invite { .. }, SignInInput::Back) => SignInStep::Server { problem: None },
+            (SignInStep::Name { .. }, SignInInput::Name { name }) => {
+                let name = name.trim();
+                if name.is_empty() || name.chars().count() > 80 {
+                    SignInStep::Name {
+                        server: self.server.clone(),
+                        problem: Some(SignInProblem::Other {
+                            reason: "Type the name people should see.".to_owned(),
+                        }),
+                    }
+                } else {
+                    self.display_name = name.to_owned();
+                    SignInStep::Email {
+                        server: self.server.clone(),
+                        problem: None,
+                    }
+                }
+            }
+            (SignInStep::Name { .. }, SignInInput::Back) => SignInStep::Invite {
+                server: self.server.clone(),
+                problem: None,
             },
             (SignInStep::Email { .. }, SignInInput::Email { email }) => {
                 if email_ok(&email) {
@@ -186,13 +246,21 @@ impl Flow {
                     }
                 }
             }
+            (SignInStep::Email { .. }, SignInInput::Back) if joining => SignInStep::Name {
+                server: self.server.clone(),
+                problem: None,
+            },
             (SignInStep::Email { .. }, SignInInput::Back) => SignInStep::Server { problem: None },
             (SignInStep::Password { .. }, SignInInput::Back) => SignInStep::Email {
                 server: self.server.clone(),
                 problem: None,
             },
             (SignInStep::Password { .. }, SignInInput::Password { password }) => {
-                self.submit(&password)
+                if joining {
+                    self.accept(&password)
+                } else {
+                    self.submit(&password)
+                }
             }
             _ => self.step.clone(),
         };
@@ -206,33 +274,63 @@ impl Flow {
             problem: Some(problem),
         };
         match post_session(&self.server, &self.email, password) {
-            Ok(saved) => {
-                let account = saved.user_id.clone();
-                let session = match serde_json::to_string(&saved) {
-                    Ok(session) => session,
-                    Err(_) => {
-                        return SignInStep::Failed {
-                            reason: "The server's answer could not be kept.".to_owned(),
-                        }
-                    }
-                };
-                match (self.adopt)(&session) {
-                    Ok(_) => SignInStep::Done {
-                        account: Some(AccountKey {
-                            network: Network::Tiny,
-                            account,
-                        }),
-                    },
-                    Err(_) => SignInStep::Failed {
-                        reason: "The sign-in could not be kept.".to_owned(),
-                    },
-                }
-            }
+            Ok(saved) => self.kept(saved),
             Err(fault) => match password_outcome(fault) {
                 Ok(problem) => again(problem),
                 Err(reason) => SignInStep::Failed {
                     reason: reason.to_owned(),
                 },
+            },
+        }
+    }
+
+    fn accept(&self, password: &str) -> SignInStep {
+        let again = |problem| SignInStep::Password {
+            hint: String::new(),
+            problem: Some(problem),
+        };
+        let length = password.chars().count();
+        if !(12..=128).contains(&length) {
+            return again(SignInProblem::Other {
+                reason: "Use 12 to 128 characters.".to_owned(),
+            });
+        }
+        match post_accept(
+            &self.server,
+            &self.code,
+            &self.email,
+            password,
+            &self.display_name,
+        ) {
+            Ok(saved) => self.kept(saved),
+            Err(fault) => match password_outcome(fault) {
+                Ok(problem) => again(problem),
+                Err(reason) => SignInStep::Failed {
+                    reason: reason.to_owned(),
+                },
+            },
+        }
+    }
+
+    fn kept(&self, saved: super::Saved) -> SignInStep {
+        let account = saved.user_id.clone();
+        let session = match serde_json::to_string(&saved) {
+            Ok(session) => session,
+            Err(_) => {
+                return SignInStep::Failed {
+                    reason: "The server's answer could not be kept.".to_owned(),
+                }
+            }
+        };
+        match (self.adopt)(&session) {
+            Ok(_) => SignInStep::Done {
+                account: Some(AccountKey {
+                    network: Network::Tiny,
+                    account,
+                }),
+            },
+            Err(_) => SignInStep::Failed {
+                reason: "The sign-in could not be kept.".to_owned(),
             },
         }
     }
@@ -250,6 +348,9 @@ fn password_outcome(fault: Fault) -> Result<SignInProblem, &'static str> {
         }),
         Fault::Unreachable => Ok(SignInProblem::Unreachable),
         Fault::BadAnswer => Err("The server's answer could not be read."),
+        Fault::Words(reason) => Ok(SignInProblem::Other {
+            reason: reason.to_owned(),
+        }),
     }
 }
 
@@ -274,8 +375,14 @@ mod tests {
         Box::new(|_session| Ok(Vec::new()))
     }
 
+    fn one_sheet() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn a_bad_address_stays_on_the_server_step_and_a_bad_email_stays_on_email() {
+        let _one = one_sheet();
         cancel();
         let hub = hub();
         assert_eq!(
@@ -459,5 +566,220 @@ mod tests {
             }
         )
         .contains("hunter2"));
+        assert!(!format!(
+            "{:?}",
+            SignInInput::Invite {
+                code: "secret-code".into()
+            }
+        )
+        .contains("secret"));
+        assert!(!format!(
+            "{:?}",
+            SignInInput::Name {
+                name: "Ada Lovelace".into()
+            }
+        )
+        .contains("Ada"));
+    }
+
+    #[test]
+    fn a_code_joins_from_the_same_sheet() {
+        let _one = one_sheet();
+        cancel();
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = hits.clone();
+        let base = super::super::tests::serve(move |request| {
+            seen.lock().unwrap().push(request.to_owned());
+            if request.lines().next().unwrap_or("").starts_with("POST /v1/invites/accept ") {
+                return super::super::tests::http(
+                    200,
+                    "OK",
+                    r#"{"token":"tok_join","user_id":"22222222-2222-2222-2222-222222222222","email":"ada@example.com","display_name":"Ada","role":"member"}"#,
+                );
+            }
+            super::super::tests::http(500, "Internal Server Error", r#"{"error":"no"}"#)
+        });
+        let kept = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let kept_step = kept.clone();
+        let hub = hub();
+        assert_eq!(
+            step(
+                &hub,
+                None,
+                Box::new(move |session| {
+                    *kept_step.lock().unwrap() = Some(session.to_owned());
+                    Ok(Vec::new())
+                }),
+            )
+            .unwrap(),
+            SignInStep::Server { problem: None }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::HaveCode {
+                    url: "not a url".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Server {
+                problem: Some(SignInProblem::UrlInvalid)
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::HaveCode { url: base.clone() }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Invite {
+                server: base.clone(),
+                problem: None
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Invite {
+                    code: "   ".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Invite {
+                server: base.clone(),
+                problem: Some(SignInProblem::Other {
+                    reason: "Paste the code you were given.".into()
+                })
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Invite {
+                    code: " join-code ".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Name {
+                server: base.clone(),
+                problem: None
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Name {
+                    name: "n".repeat(81)
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Name {
+                server: base.clone(),
+                problem: Some(SignInProblem::Other {
+                    reason: "Type the name people should see.".into()
+                })
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Name {
+                    name: " Ada ".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Email {
+                server: base.clone(),
+                problem: None
+            }
+        );
+        assert_eq!(
+            step(&hub, Some(SignInInput::Back), adopt()).unwrap(),
+            SignInStep::Name {
+                server: base.clone(),
+                problem: None
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Name { name: "Ada".into() }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Email {
+                server: base.clone(),
+                problem: None
+            }
+        );
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Email {
+                    email: "ada@example.com".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Password {
+                hint: String::new(),
+                problem: None
+            }
+        );
+        assert_eq!(hits.lock().unwrap().len(), 0);
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Password {
+                    password: "short".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Password {
+                hint: String::new(),
+                problem: Some(SignInProblem::Other {
+                    reason: "Use 12 to 128 characters.".into()
+                })
+            }
+        );
+        assert_eq!(hits.lock().unwrap().len(), 0);
+        assert_eq!(
+            step(
+                &hub,
+                Some(SignInInput::Password {
+                    password: "correct-horse".into()
+                }),
+                adopt()
+            )
+            .unwrap(),
+            SignInStep::Done {
+                account: Some(AccountKey {
+                    network: Network::Tiny,
+                    account: "22222222-2222-2222-2222-222222222222".into(),
+                })
+            }
+        );
+        let sent = hits.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].lines().next().unwrap_or("").starts_with("POST /v1/invites/accept "));
+        let body: serde_json::Value = serde_json::from_str(sent[0].split("\r\n\r\n").nth(1).unwrap_or("")).unwrap();
+        assert_eq!(body["token"], "join-code");
+        assert_eq!(body["email"], "ada@example.com");
+        assert_eq!(body["display_name"], "Ada");
+        assert_eq!(body["password"], "correct-horse");
+        let session = kept.lock().unwrap().clone().expect("adopted");
+        let saved: serde_json::Value = serde_json::from_str(&session).unwrap();
+        assert_eq!(saved["user_id"], "22222222-2222-2222-2222-222222222222");
+        assert_eq!(saved["role"], "member");
+        assert_eq!(saved["base_url"], base);
+        assert_eq!(saved["display_name"], "Ada");
+        cancel();
     }
 }

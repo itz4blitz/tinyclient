@@ -23,6 +23,7 @@ mod signin;
 mod shortcuts;
 mod state;
 mod theme;
+mod tiny;
 mod time;
 
 use gpui::{point, prelude::*, px, size, App, Bounds, Context, Div, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions};

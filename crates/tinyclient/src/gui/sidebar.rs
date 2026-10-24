@@ -1371,6 +1371,27 @@ impl Shell {
         match &state.mode {
             Mode::People => div().into_any_element(),
             Mode::Inbox => self.inbox_list(window, cx),
+            // No rooms. People on this server are drawn in the window, not as channels.
+            Mode::Network(Network::Tiny) => match snapshot.link(Network::Tiny) {
+                Link::Connected => div()
+                    .size_full()
+                    .px(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .max_w(px(220.))
+                            .text_center()
+                            .whitespace_normal()
+                            .type_ui()
+                            .text_color(theme::text_soft())
+                            .child("People on this server are in the window."),
+                    )
+                    .into_any_element(),
+                Link::Offline => empty("icons/wifi-off.svg", "Tiny server is offline", "It shows up here once it connects."),
+                _ => empty("icons/users.svg", "Tiny server", "Sign in to see who's here."),
+            },
             _ if state.listed() => self.home_list(snapshot, window, cx),
             Mode::Network(network) if state.rows.is_empty() && state.spaces_loaded => {
                 let name = network.label();
@@ -1400,6 +1421,7 @@ impl Shell {
 
     pub(super) fn sidebar(&self, snapshot: &Snapshot, width: f32, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let people = self.sidebar_state.mode == Mode::People;
+        let tiny = matches!(self.sidebar_state.mode, Mode::Network(Network::Tiny));
         if !matches!(&self.sidebar_state.mode, Mode::Space(space) if space.network == Network::Discord) {
             self.sidebar_state.width.set(width);
         }
@@ -1422,7 +1444,7 @@ impl Shell {
             .border_r_1()
             .border_color(theme::hairline())
             .child(self.title_strip(&self.sidebar_state.mode, cx))
-            .when(!people, |sidebar| sidebar.child(self.jump_strip(cx)))
+            .when(!people && !tiny, |sidebar| sidebar.child(self.jump_strip(cx)))
             .children(tabs)
             .when(!banners.is_empty(), |sidebar| sidebar.child(div().flex_none().px(px(theme::INSET)).pb(px(8.)).flex().flex_col().gap(px(4.)).children(banners)))
             .child(div().id("sidebar-list").flex_1().min_h_0().track_focus(&self.sidebar_state.focus).key_context("Sidebar").child(body))

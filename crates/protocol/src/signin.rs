@@ -97,6 +97,18 @@ pub enum SignInStep {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         problem: Option<SignInProblem>,
     },
+    /// Ask for an invite code for `server`.
+    Invite {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problem: Option<SignInProblem>,
+    },
+    /// Ask for the name people should see.
+    Name {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problem: Option<SignInProblem>,
+    },
     /// Signed in. The account is in `Status` from now on.
     Done {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +133,12 @@ pub enum SignInInput {
     Server { url: String },
     /// The email on that server, as typed.
     Email { email: String },
+    /// A Tiny server's address, to join it with a code.
+    HaveCode { url: String },
+    /// The invite code, as pasted.
+    Invite { code: String },
+    /// The name people should see.
+    Name { name: String },
     /// Send the code again, the way `SignInStep::Code::next` says.
     Resend,
     /// One step back: from the code to the number, from the number to the QR code.
@@ -138,6 +156,9 @@ impl fmt::Debug for SignInInput {
             SignInInput::Password { .. } => "Password { .. }",
             SignInInput::Server { .. } => "Server { .. }",
             SignInInput::Email { .. } => "Email { .. }",
+            SignInInput::HaveCode { .. } => "HaveCode { .. }",
+            SignInInput::Invite { .. } => "Invite { .. }",
+            SignInInput::Name { .. } => "Name { .. }",
             SignInInput::Resend => "Resend",
             SignInInput::Back => "Back",
         })
@@ -160,6 +181,13 @@ mod tests {
         assert!(!format!("{url:?}").contains("127.0.0.1"));
         assert!(!format!("{email:?}").contains("ada@"));
         assert!(!format!("{email:?}").contains("example.com"));
+        let invite = SignInInput::Invite { code: "secret-code".into() };
+        let name = SignInInput::Name { name: "Ada Lovelace".into() };
+        assert_eq!(format!("{invite:?}"), "Invite { .. }");
+        assert_eq!(format!("{name:?}"), "Name { .. }");
+        assert!(!format!("{invite:?}").contains("secret-code"));
+        assert!(!format!("{name:?}").contains("Ada"));
+        assert!(!format!("{name:?}").contains("Lovelace"));
         // A step with nothing but its name still reads: every other field is optional.
         assert_eq!(serde_json::from_str::<SignInStep>(r#"{"step":"server"}"#).unwrap(), SignInStep::Server { problem: None });
         let email_step = SignInStep::Email { server: "http://127.0.0.1:8080".into(), problem: None };

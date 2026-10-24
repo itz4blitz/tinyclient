@@ -1718,6 +1718,10 @@ impl Chat {
                 Response::Ok
             }
             Request::SignOut { account } => self.sign_out(account),
+            Request::TinyCommunity { account } => adapters::tiny::community(account),
+            Request::TinyInvite { account, role } => adapters::tiny::invite(account, role),
+            Request::TinyRole { account, user_id, role } => adapters::tiny::set_role(account, user_id, role),
+            Request::TinyRemove { account, user_id } => adapters::tiny::remove(account, user_id),
 
             Request::CallStart { conversation } => self.call_start(conversation),
             Request::CallAccept => match self.hub.calls.accept(&self.hub) {
