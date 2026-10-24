@@ -825,6 +825,7 @@ impl Render for Shell {
         self.note_place(window, cx);
         self.follow_changes(cx);
         self.refresh_menus(cx);
+        self.note_tiny_page(cx);
         // Before the first answer the window is still drawn: rail, strips, an empty list, and
         // what it waits on. Never a blank canvas, never a developer message.
         let placeholder;
@@ -872,6 +873,7 @@ impl Render for Shell {
                 let pane = match (&snapshot.open, self.keychain_state(window, cx)) {
                     (_, Some(waiting)) => waiting,
                     (Some(_), None) => self.conversation(snapshot, window, cx),
+                    (None, None) if self.tiny_open() => self.tiny_page(window, cx),
                     (None, None) => self.nothing_open(window, cx),
                 };
                 root.child(div().flex_1().min_w_0().h_full().child(pane))
