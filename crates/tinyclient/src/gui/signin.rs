@@ -3,7 +3,8 @@
 //! scan, or a phone number, the code Telegram sends and, for accounts that have one, the two-step
 //! password. Signal: only the code to scan from the phone, which links this computer as one more
 //! device; a number typed here would take the account from the phone, so none is asked. A Tiny
-//! server asks for its address, then an email, then the password for that server.
+//! server asks for its address, then an email, then a password of 12 to 128 characters.
+//! A code from someone already on that server is its own step, then the name people there will see.
 //!
 //! chatd owns the sign-in. The sheet asks it to begin, draws the step it is told
 //! (`protocol::SignInStep`) and answers it; while the sheet is open its own loop asks `Wait` and
@@ -89,6 +90,10 @@ pub struct Sheet {
     url: Entity<TextInput>,
     /// The email on that server.
     email: Entity<TextInput>,
+    /// An invite code for that server.
+    invite: Entity<TextInput>,
+    /// The name people on that server will see.
+    name: Entity<TextInput>,
     /// Has the keys when no field does, so Escape still closes the sheet.
     focus: FocusHandle,
     /// The step changed: put the keys where typing goes, on the next frame.
@@ -227,7 +232,9 @@ fn step_problem(step: &SignInStep) -> Option<&SignInProblem> {
         | SignInStep::Code { problem, .. }
         | SignInStep::Password { problem, .. }
         | SignInStep::Server { problem }
-        | SignInStep::Email { problem, .. } => problem.as_ref(),
+        | SignInStep::Email { problem, .. }
+        | SignInStep::Invite { problem, .. }
+        | SignInStep::Name { problem, .. } => problem.as_ref(),
         SignInStep::Done { .. } | SignInStep::Failed { .. } => None,
     }
 }
@@ -266,6 +273,8 @@ impl Sheet {
         let password = cx.new(|cx| TextInput::new("", cx));
         let url = cx.new(|cx| TextInput::new("tiny.example.com", cx));
         let email = cx.new(|cx| TextInput::new("Email", cx));
+        let invite = cx.new(|cx| TextInput::new("Invite code", cx));
+        let name = cx.new(|cx| TextInput::new("Name", cx));
         for input in [&country, &number] {
             cx.subscribe(input, |this, _, event: &InputEvent, cx| match event {
                 InputEvent::Submit => this.send_phone(cx),
@@ -306,8 +315,24 @@ impl Sheet {
             }
         })
         .detach();
+        cx.subscribe(&invite, |this, _, event: &InputEvent, cx| match event {
+            InputEvent::Submit => this.send_invite(cx),
+            InputEvent::Changed => {
+                this.dismiss();
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&name, |this, _, event: &InputEvent, cx| match event {
+            InputEvent::Submit => this.send_name(cx),
+            InputEvent::Changed => {
+                this.dismiss();
+                cx.notify();
+            }
+        })
+        .detach();
         // Escape in a field is the field's key; it hands it on.
-        for input in [&country, &number, &digits, &password, &url, &email] {
+        for input in [&country, &number, &digits, &password, &url, &email, &invite, &name] {
             cx.subscribe(input, |this, _, event: &InputKey, cx| {
                 if matches!(event, InputKey::Escape) {
                     this.close(true, cx);
@@ -330,6 +355,8 @@ impl Sheet {
             password,
             url,
             email,
+            invite,
+            name,
             focus: cx.focus_handle(),
             refocus: false,
             before: None,
@@ -408,6 +435,8 @@ impl Sheet {
         self.country.update(cx, |input, cx| input.set_text("+1", cx));
         self.url.update(cx, |input, cx| input.set_text("", cx));
         self.email.update(cx, |input, cx| input.set_text("", cx));
+        self.invite.update(cx, |input, cx| input.set_text("", cx));
+        self.name.update(cx, |input, cx| input.set_text("", cx));
     }
 
     /// Drops a typed code and password. They live nowhere else.
@@ -426,6 +455,8 @@ impl Sheet {
             SignInStep::Phone { problem }
             | SignInStep::Server { problem }
             | SignInStep::Email { problem, .. }
+            | SignInStep::Invite { problem, .. }
+            | SignInStep::Name { problem, .. }
             | SignInStep::Password { problem, .. } => *problem = None,
             _ => {}
         }
@@ -707,6 +738,41 @@ impl Sheet {
         self.answer(SignInInput::Email { email }, cx);
     }
 
+    fn send_have_code(&mut self, cx: &mut Context<Sheet>) {
+        if self.busy {
+            return;
+        }
+        let url = self.url.read(cx).text().to_owned();
+        self.dismiss();
+        self.answer(SignInInput::HaveCode { url }, cx);
+    }
+
+    fn send_invite(&mut self, cx: &mut Context<Sheet>) {
+        if self.busy {
+            return;
+        }
+        let code = self.invite.read(cx).text().to_owned();
+        if code.trim().is_empty() {
+            return;
+        }
+        // A code is not kept in the field after it is sent.
+        self.invite.update(cx, |input, cx| input.set_text("", cx));
+        self.dismiss();
+        self.answer(SignInInput::Invite { code }, cx);
+    }
+
+    fn send_name(&mut self, cx: &mut Context<Sheet>) {
+        if self.busy {
+            return;
+        }
+        let name = self.name.read(cx).text().to_owned();
+        if name.trim().is_empty() {
+            return;
+        }
+        self.dismiss();
+        self.answer(SignInInput::Name { name }, cx);
+    }
+
     /// Where typing goes on the step on show.
     fn target(&self, cx: &App) -> FocusHandle {
         match &self.face {
@@ -715,6 +781,8 @@ impl Sheet {
             Some(Face::Step(SignInStep::Password { .. })) => self.password.focus_handle(cx),
             Some(Face::Step(SignInStep::Server { .. })) => self.url.focus_handle(cx),
             Some(Face::Step(SignInStep::Email { .. })) => self.email.focus_handle(cx),
+            Some(Face::Step(SignInStep::Invite { .. })) => self.invite.focus_handle(cx),
+            Some(Face::Step(SignInStep::Name { .. })) => self.name.focus_handle(cx),
             _ => self.focus.clone(),
         }
     }
@@ -962,7 +1030,7 @@ impl Sheet {
         let tiny = self.network == Network::Tiny;
         let heading = if tiny { self.header("Password", true, cx) } else { self.header("Two-step verification password", true, cx) };
         let aside = if tiny {
-            div().type_ui().text_color(theme::text_soft()).child("The password for that server.")
+            div().type_ui().text_color(theme::text_soft()).child("A password of 12 to 128 characters.")
         } else {
             // Words in a link's color, not a link: the reset happens in Telegram's own app.
             div().type_ui().text_color(theme::accent_text()).child("Forgot it? Reset it in the Telegram app.")
@@ -989,6 +1057,12 @@ impl Sheet {
             .child(input)
             .children(problem.map(|problem| error_line(problem_words(self.network, problem)).mt(px(6.))))
             .child(footer(22.).child(div()).child(buttons().child(self.cancel("Cancel", cx)).child(self.primary("Continue", Sheet::send_url, cx))))
+            .child(div().mt(px(12.)).child(self.have_code(cx)))
+    }
+
+    /// "I have a code" reads the address already typed. `answer_link` cannot see the field.
+    fn have_code(&self, cx: &Context<Sheet>) -> Stateful<Div> {
+        link("signin-have-code", "I have a code").on_click(cx.listener(|this, _, _, cx| this.send_have_code(cx)))
     }
 
     fn email_step(&self, server: &str, problem: Option<&SignInProblem>, window: &mut Window, cx: &Context<Sheet>) -> Div {
@@ -1002,6 +1076,32 @@ impl Sheet {
             .child(input)
             .children(problem.map(|problem| error_line(problem_words(self.network, problem)).mt(px(6.))))
             .child(footer(22.).child(div()).child(buttons().child(self.cancel("Cancel", cx)).child(self.primary("Continue", Sheet::send_email, cx))))
+    }
+
+    fn invite_step(&self, server: &str, problem: Option<&SignInProblem>, window: &mut Window, cx: &Context<Sheet>) -> Div {
+        let focused = self.invite.focus_handle(cx).is_focused(window);
+        let input = tall_field(focused, problem.is_some()).child(self.invite.clone());
+        div()
+            .flex()
+            .flex_col()
+            .child(self.header("Code", true, cx))
+            .child(div().mt(px(6.)).mb(px(16.)).text_color(theme::text_soft()).child(server.to_owned()))
+            .child(input)
+            .children(problem.map(|problem| error_line(problem_words(self.network, problem)).mt(px(6.))))
+            .child(footer(22.).child(div()).child(buttons().child(self.cancel("Cancel", cx)).child(self.primary("Continue", Sheet::send_invite, cx))))
+    }
+
+    fn name_step(&self, problem: Option<&SignInProblem>, window: &mut Window, cx: &Context<Sheet>) -> Div {
+        let focused = self.name.focus_handle(cx).is_focused(window);
+        let input = tall_field(focused, problem.is_some()).child(self.name.clone());
+        div()
+            .flex()
+            .flex_col()
+            .child(self.header("Name", true, cx))
+            .child(div().mt(px(6.)).mb(px(16.)).text_color(theme::text_soft()).child("The name people on that server will see."))
+            .child(input)
+            .children(problem.map(|problem| error_line(problem_words(self.network, problem)).mt(px(6.))))
+            .child(footer(22.).child(div()).child(buttons().child(self.cancel("Cancel", cx)).child(self.primary("Continue", Sheet::send_name, cx))))
     }
 
     fn title(&self) -> &'static str {
@@ -1219,6 +1319,8 @@ impl Render for Sheet {
                     SignInStep::Password { hint, .. } => self.password_step(hint, problem, window, cx),
                     SignInStep::Server { .. } => self.server_step(problem, window, cx),
                     SignInStep::Email { server, .. } => self.email_step(server, problem, window, cx),
+                    SignInStep::Invite { server, .. } => self.invite_step(server, problem, window, cx),
+                    SignInStep::Name { .. } => self.name_step(problem, window, cx),
                     SignInStep::Failed { reason } => self.failed_step(reason, cx),
                     SignInStep::Done { .. } => div(),
                 }
