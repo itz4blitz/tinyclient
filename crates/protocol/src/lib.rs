@@ -21,6 +21,7 @@ mod play;
 mod react;
 pub mod settings;
 mod signin;
+mod tiny;
 
 pub use call::*;
 pub use crash::redact;
@@ -30,6 +31,7 @@ pub use message::*;
 pub use play::*;
 pub use react::*;
 pub use signin::*;
+pub use tiny::*;
 
 pub const CHAT_SOCK_NAME: &str = "chat.sock";
 
@@ -1347,6 +1349,26 @@ pub enum Request {
     },
     /// Plays the test sound on the call speaker (V2): in the call's mediad, or one started for it.
     TestSound,
+    /// Who is on this Tiny server. An owner or an admin also gets the invites and the audit.
+    TinyCommunity {
+        account: AccountKey,
+    },
+    /// Creates an invite for `role` (`admin` or `member`). The token is in the answer, once.
+    TinyInvite {
+        account: AccountKey,
+        role: String,
+    },
+    /// Changes one member's role (`owner`, `admin`, or `member`).
+    TinyRole {
+        account: AccountKey,
+        user_id: String,
+        role: String,
+    },
+    /// Removes one member.
+    TinyRemove {
+        account: AccountKey,
+        user_id: String,
+    },
 }
 
 /// One thing that changed. The shell asks again for exactly that; the ephemeral kinds carry their
@@ -1613,6 +1635,14 @@ pub enum Response {
     Prunable {
         messages: u64,
         bytes: u64,
+    },
+    /// Who is on this Tiny server, plus the invites and the audit when this account may see them.
+    TinyCommunity {
+        community: TinyCommunity,
+    },
+    /// An invite that was just created. `code.token` is not kept.
+    TinyCode {
+        code: TinyCode,
     },
 }
 
