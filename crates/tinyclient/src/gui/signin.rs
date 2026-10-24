@@ -752,10 +752,8 @@ impl Sheet {
             return;
         }
         let code = self.invite.read(cx).text().to_owned();
-        if code.trim().is_empty() {
-            return;
-        }
-        // A code is not kept in the field after it is sent.
+        // A code is not kept in the field after it is sent. An empty one still goes to chatd,
+        // which stays on this step and says to paste the code.
         self.invite.update(cx, |input, cx| input.set_text("", cx));
         self.dismiss();
         self.answer(SignInInput::Invite { code }, cx);
@@ -766,9 +764,6 @@ impl Sheet {
             return;
         }
         let name = self.name.read(cx).text().to_owned();
-        if name.trim().is_empty() {
-            return;
-        }
         self.dismiss();
         self.answer(SignInInput::Name { name }, cx);
     }

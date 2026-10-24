@@ -1372,22 +1372,26 @@ impl Shell {
             Mode::People => div().into_any_element(),
             Mode::Inbox => self.inbox_list(window, cx),
             // No rooms. People on this server are drawn in the window, not as channels.
-            Mode::Network(Network::Tiny) => div()
-                .size_full()
-                .px(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .max_w(px(220.))
-                        .text_center()
-                        .whitespace_normal()
-                        .type_ui()
-                        .text_color(theme::text_soft())
-                        .child("People on this server are in the window."),
-                )
-                .into_any_element(),
+            Mode::Network(Network::Tiny) => match snapshot.link(Network::Tiny) {
+                Link::Connected => div()
+                    .size_full()
+                    .px(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .max_w(px(220.))
+                            .text_center()
+                            .whitespace_normal()
+                            .type_ui()
+                            .text_color(theme::text_soft())
+                            .child("People on this server are in the window."),
+                    )
+                    .into_any_element(),
+                Link::Offline => empty("icons/wifi-off.svg", "Tiny server is offline", "It shows up here once it connects."),
+                _ => empty("icons/users.svg", "Tiny server", "Sign in to see who's here."),
+            },
             _ if state.listed() => self.home_list(snapshot, window, cx),
             Mode::Network(network) if state.rows.is_empty() && state.spaces_loaded => {
                 let name = network.label();
